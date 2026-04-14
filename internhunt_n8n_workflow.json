@@ -1,0 +1,375 @@
+{
+  "name": "InternHunt - Job Board Scraper (No LinkedIn)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 60]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://internshala.com/internships/keywords-python,machine-learning,data-science/",
+        "options": {
+          "timeout": 15000,
+          "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          }
+        }
+      },
+      "id": "http-internshala",
+      "name": "Fetch Internshala",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [460, -80]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://remoteok.com/api?tag=python",
+        "options": {
+          "timeout": 15000,
+          "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          }
+        }
+      },
+      "id": "http-remoteok",
+      "name": "Fetch RemoteOK API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [460, 60]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.adzuna.com/v1/api/jobs/in/search/1?app_id=YOUR_APP_ID&app_key=YOUR_APP_KEY&results_per_page=20&what=python+internship&content-type=application/json",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "http-adzuna",
+      "name": "Fetch Adzuna API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [460, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Parse Internshala HTML ──────────────────────────────\nconst cheerio = require('cheerio');\nconst html = $input.first().json.data || '';\nconst $ = cheerio.load(html);\nconst jobs = [];\n\n$('.internship_meta').each((i, el) => {\n  const title   = $(el).find('.profile').text().trim();\n  const company = $(el).find('.company_name').text().trim();\n  const link    = 'https://internshala.com' + ($(el).find('a.view_detail_button').attr('href') || '');\n  const stipend = $(el).find('.stipend').text().trim();\n  const location = $(el).find('.location_link').text().trim();\n  const jobId   = 'internshala_' + Buffer.from(link).toString('base64').slice(0, 12);\n\n  if (title) {\n    jobs.push({ jobId, title, company, link, stipend, location, source: 'Internshala' });\n  }\n});\n\nreturn jobs.map(j => ({ json: j }));",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "parse-internshala",
+      "name": "Parse Internshala",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, -80]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Parse RemoteOK JSON API ─────────────────────────────\n// RemoteOK returns a JSON array; first element is a legal notice object — skip it.\nconst raw = $input.first().json;\nconst items = Array.isArray(raw) ? raw.slice(1) : [];\n\nconst INTERN_KEYWORDS = ['intern', 'internship', 'junior', 'entry', 'fresher', 'trainee', 'graduate'];\n\nreturn items\n  .filter(r => {\n    const text = `${r.position} ${(r.tags || []).join(' ')}`.toLowerCase();\n    return INTERN_KEYWORDS.some(k => text.includes(k));\n  })\n  .map(r => ({\n    json: {\n      jobId:    'remoteok_' + r.id,\n      title:    r.position,\n      company:  r.company,\n      link:     r.url,\n      stipend:  r.salary_min ? `$${r.salary_min}–$${r.salary_max}/yr` : 'Remote · See listing',\n      location: 'Remote Worldwide',\n      source:   'RemoteOK'\n    }\n  }));",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "parse-remoteok",
+      "name": "Parse RemoteOK",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 60]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Parse Adzuna JSON API response ──────────────────────\nconst body = $input.first().json;\nconst results = body.results || [];\n\nreturn results.map(r => ({\n  json: {\n    jobId:    'adzuna_' + r.id,\n    title:    r.title,\n    company:  r.company?.display_name || 'Unknown',\n    link:     r.redirect_url,\n    stipend:  r.salary_min ? `₹${Math.round(r.salary_min / 12).toLocaleString()}/mo` : 'Not listed',\n    location: r.location?.display_name || '',\n    source:   'Adzuna'\n  }\n}));",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "parse-adzuna",
+      "name": "Parse Adzuna",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 200]
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "inputs": 3
+      },
+      "id": "merge-all",
+      "name": "Merge All Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [900, 60]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Keyword & Quality Filter ─────────────────────────────\nconst KEYWORDS = [\n  'python', 'machine learning', 'ml', 'data science',\n  'backend', 'django', 'flask', 'fastapi', 'node', 'react',\n  'ai', 'nlp', 'deep learning', 'computer vision', 'remote'\n];\n\nconst EXCLUDE = ['senior', 'lead', 'manager', 'director', '5+ years', '7+ years'];\n\nconst matched = [];\n\nfor (const item of $input.all()) {\n  const j = item.json;\n  const text = `${j.title} ${j.company} ${j.location}`.toLowerCase();\n\n  const hasKeyword = KEYWORDS.some(k => text.includes(k));\n  const isExcluded = EXCLUDE.some(e => text.includes(e));\n\n  if (hasKeyword && !isExcluded) {\n    matched.push({ json: j });\n  }\n}\n\nreturn matched;",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "keyword-filter",
+      "name": "Keyword Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 60]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "sheets-read",
+      "name": "Read Seen Jobs",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.3,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Deduplication: remove jobs already logged ─────────────\nconst allJobs  = $input.all().filter(i => i.json.jobId);\nconst seenRows = $input.all().filter(i => i.json.job_id);\n\nconst seenIds = new Set(seenRows.map(r => r.json.job_id));\n\nconst newJobs = allJobs.filter(j => !seenIds.has(j.json.jobId));\n\nif (newJobs.length === 0) {\n  return [{ json: { _noNewJobs: true } }];\n}\n\nreturn newJobs;",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "dedup",
+      "name": "Deduplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 60]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json._noNewJobs }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "if-new-jobs",
+      "name": "Any New Jobs?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1560, 60]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_id":    "={{ $json.jobId }}",
+            "title":     "={{ $json.title }}",
+            "company":   "={{ $json.company }}",
+            "link":      "={{ $json.link }}",
+            "stipend":   "={{ $json.stipend }}",
+            "location":  "={{ $json.location }}",
+            "source":    "={{ $json.source }}",
+            "notified_at": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "sheets-log",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.3,
+      "position": [1780, -80]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Build Email HTML & Slack Block ───────────────────────\nconst jobs = $input.all().map(i => i.json);\n\n// HTML email body\nconst rows = jobs.map(j => `\n  <tr>\n    <td style=\"padding:10px 8px;border-bottom:1px solid #eee\">\n      <a href=\"${j.link}\" style=\"color:#4f46e5;font-weight:600;text-decoration:none\">${j.title}</a><br>\n      <span style=\"color:#555;font-size:13px\">${j.company} · ${j.location}</span>\n    </td>\n    <td style=\"padding:10px 8px;border-bottom:1px solid #eee;color:#10b981;font-weight:500\">${j.stipend}</td>\n    <td style=\"padding:10px 8px;border-bottom:1px solid #eee;color:#6b7280;font-size:12px\">${j.source}</td>\n  </tr>\n`).join('');\n\nconst emailHtml = `\n<div style=\"font-family:Arial,sans-serif;max-width:640px;margin:auto\">\n  <h2 style=\"color:#4f46e5\">🎯 InternHunt — ${jobs.length} new internship${jobs.length > 1 ? 's' : ''} found</h2>\n  <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-collapse:collapse\">\n    <thead>\n      <tr style=\"background:#f5f3ff\">\n        <th style=\"text-align:left;padding:10px 8px;color:#4f46e5\">Role</th>\n        <th style=\"text-align:left;padding:10px 8px;color:#4f46e5\">Stipend</th>\n        <th style=\"text-align:left;padding:10px 8px;color:#4f46e5\">Source</th>\n      </tr>\n    </thead>\n    <tbody>${rows}</tbody>\n  </table>\n  <p style=\"color:#9ca3af;font-size:12px;margin-top:20px\">Powered by InternHunt · n8n workflow</p>\n</div>`;\n\n// Slack Block Kit\nconst slackBlocks = [\n  {\n    type: 'header',\n    text: { type: 'plain_text', text: `🎯 ${jobs.length} new internship${jobs.length > 1 ? 's' : ''} found`, emoji: true }\n  },\n  { type: 'divider' },\n  ...jobs.map(j => ({\n    type: 'section',\n    text: {\n      type: 'mrkdwn',\n      text: `*<${j.link}|${j.title}>*\\n${j.company} · ${j.location}\\n💰 ${j.stipend} · _${j.source}_`\n    }\n  })),\n  { type: 'divider' },\n  {\n    type: 'context',\n    elements: [{ type: 'mrkdwn', text: 'InternHunt · runs every 6h' }]\n  }\n];\n\nreturn [{ json: { emailHtml, slackBlocks: JSON.stringify({ blocks: slackBlocks }), count: jobs.length } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "format-message",
+      "name": "Format Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 60]
+    },
+    {
+      "parameters": {
+        "sendTo": "you@gmail.com",
+        "subject": "=🎯 InternHunt: {{ $json.count }} new internship{{ $json.count > 1 ? 's' : '' }} found",
+        "message": "={{ $json.emailHtml }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "send-email",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [2000, -80]
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "webhookUri": "YOUR_SLACK_WEBHOOK_URL",
+        "text": "New internships found",
+        "blocksUi": "={{ $json.slackBlocks }}"
+      },
+      "id": "send-slack",
+      "name": "Post to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [2000, 60]
+    },
+    {
+      "parameters": {
+        "respondWith": "noData"
+      },
+      "id": "no-op-skip",
+      "name": "No New Jobs — Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1780, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Error reporter ───────────────────────────────────────\nconst err = $input.first().json;\nreturn [{\n  json: {\n    subject: '⚠️ InternHunt workflow error',\n    body: `<b>Error in node:</b> ${err.node?.name || 'unknown'}<br><b>Message:</b> ${err.message || JSON.stringify(err)}`\n  }\n}];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "error-format",
+      "name": "Format Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 380]
+    },
+    {
+      "parameters": {
+        "sendTo": "you@gmail.com",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "error-email",
+      "name": "Email Error Alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [680, 380]
+    }
+  ],
+  "connections": {
+    "Every 6 Hours": {
+      "main": [
+        [
+          { "node": "Fetch Internshala", "type": "main", "index": 0 },
+          { "node": "Fetch RemoteOK API", "type": "main", "index": 0 },
+          { "node": "Fetch Adzuna API",  "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Fetch Internshala": {
+      "main": [[{ "node": "Parse Internshala", "type": "main", "index": 0 }]]
+    },
+    "Fetch RemoteOK API": {
+      "main": [[{ "node": "Parse RemoteOK", "type": "main", "index": 0 }]]
+    },
+    "Fetch Adzuna API": {
+      "main": [[{ "node": "Parse Adzuna", "type": "main", "index": 0 }]]
+    },
+    "Parse Internshala": {
+      "main": [[{ "node": "Merge All Sources", "type": "main", "index": 0 }]]
+    },
+    "Parse RemoteOK": {
+      "main": [[{ "node": "Merge All Sources", "type": "main", "index": 1 }]]
+    },
+    "Parse Adzuna": {
+      "main": [[{ "node": "Merge All Sources", "type": "main", "index": 2 }]]
+    },
+    "Merge All Sources": {
+      "main": [[{ "node": "Keyword Filter", "type": "main", "index": 0 }]]
+    },
+    "Keyword Filter": {
+      "main": [
+        [
+          { "node": "Deduplicate",     "type": "main", "index": 0 },
+          { "node": "Read Seen Jobs",  "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Read Seen Jobs": {
+      "main": [[{ "node": "Deduplicate", "type": "main", "index": 1 }]]
+    },
+    "Deduplicate": {
+      "main": [[{ "node": "Any New Jobs?", "type": "main", "index": 0 }]]
+    },
+    "Any New Jobs?": {
+      "main": [
+        [
+          { "node": "Log to Google Sheets",  "type": "main", "index": 0 },
+          { "node": "Format Notification",   "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "No New Jobs — Skip", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Format Notification": {
+      "main": [
+        [
+          { "node": "Send Email",    "type": "main", "index": 0 },
+          { "node": "Post to Slack", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Format Error": {
+      "main": [[{ "node": "Email Error Alert", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "internhunt-v1"
+  },
+  "pinData": {},
+  "versionId": "1",
+  "triggerCount": 1,
+  "tags": [
+    { "name": "internhunt" },
+    { "name": "job-scraper" },
+    { "name": "automation" }
+  ]
+}

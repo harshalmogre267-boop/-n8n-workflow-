@@ -1,0 +1,279 @@
+{
+  "name": "AI Study Assistant — Telegram + Claude",
+  "nodes": [
+
+    {
+      "parameters": {
+        "updates": ["message"],
+        "additionalFields": {}
+      },
+      "id": "telegram-trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "webhookId": "study-assistant-webhook"
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// ── Extract message details from Telegram update ──────────\nconst msg = $input.first().json.message || {};\n\nconst chatId   = msg.chat?.id;\nconst userId   = msg.from?.id;\nconst username = msg.from?.username || msg.from?.first_name || 'Student';\nconst text     = (msg.text || '').trim();\n\n// Parse mode and topic\n// Commands: /summary <topic>, /quiz <topic>, /explain <topic>, /flashcard <topic>\n// Or free text (defaults to explain)\nlet mode  = 'explain';\nlet topic = text;\n\nif (text.startsWith('/summary ')) {\n  mode  = 'summary';\n  topic = text.replace('/summary ', '').trim();\n} else if (text.startsWith('/quiz ')) {\n  mode  = 'quiz';\n  topic = text.replace('/quiz ', '').trim();\n} else if (text.startsWith('/explain ')) {\n  mode  = 'explain';\n  topic = text.replace('/explain ', '').trim();\n} else if (text.startsWith('/flashcard ')) {\n  mode  = 'flashcard';\n  topic = text.replace('/flashcard ', '').trim();\n} else if (text === '/start') {\n  mode  = 'welcome';\n  topic = '';\n} else if (text === '/help') {\n  mode  = 'help';\n  topic = '';\n}\n\nreturn [{ json: { chatId, userId, username, text, mode, topic } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "parse-message",
+      "name": "Parse Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false },
+          "conditions": [
+            {
+              "leftValue":  "={{ $json.mode }}",
+              "rightValue": "welcome",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "is-welcome",
+      "name": "Is /start or /help?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ '👋 Hi ' + $json.username + '! I\\'m your AI Study Assistant.\\n\\nSend me a topic using one of these commands:\\n\\n📖 /summary <topic> — Concise summary\\n🧠 /explain <topic> — Detailed explanation\\n❓ /quiz <topic> — 5 MCQ questions\\n🃏 /flashcard <topic> — 5 flashcard pairs\\n\\nOr just type any topic freely and I\\'ll explain it!\\n\\nExample: /quiz Photosynthesis' }}",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "id": "send-welcome",
+      "name": "Send Welcome Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [900, 160]
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false },
+          "conditions": [
+            {
+              "leftValue":  "={{ $json.topic }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEquals" }
+            }
+          ]
+        }
+      },
+      "id": "has-topic",
+      "name": "Has Topic?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 400]
+    },
+
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "Please provide a topic after the command.\\n\\nExample: `/quiz Newton's laws of motion`",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "id": "send-no-topic",
+      "name": "Ask for Topic",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1120, 540]
+    },
+
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ '⏳ Generating your ' + $json.mode + ' on *' + $json.topic + '*...' }}",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "id": "send-typing",
+      "name": "Send Thinking Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1120, 380]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// ── Build Claude prompt based on mode ────────────────────\nconst { mode, topic, username } = $input.first().json;\n\nconst prompts = {\n  summary: `You are a study assistant. Give a clear, well-structured summary of \"${topic}\" suitable for a university student.\n\nFormat your response as:\n📌 *Topic:* ${topic}\n\n*Key Points:*\n• Point 1\n• Point 2\n• (up to 6 bullet points)\n\n*In one sentence:* <one-line takeaway>\n\nKeep it concise — under 300 words. Use Telegram Markdown formatting.`,\n\n  explain: `You are a study assistant. Explain \"${topic}\" clearly to a university student.\n\nFormat your response as:\n🧠 *Explanation: ${topic}*\n\n<Clear explanation in 3–5 paragraphs. Use analogies and examples where helpful.>\n\n*Key Takeaway:* <1 sentence summary>\n\nUse Telegram Markdown formatting.`,\n\n  quiz: `You are a study assistant. Create exactly 5 multiple-choice quiz questions about \"${topic}\" for a university student.\n\nFormat EXACTLY like this:\n❓ *Quiz: ${topic}*\n\n*Q1.* <question>\na) <option>\nb) <option>\nc) <option>\nd) <option>\n✅ *Answer:* <correct option letter>) <correct answer>\n\n*Q2.* ... (repeat for all 5 questions)\n\n---\n💡 _Tip: Try answering each question before looking at the answer!_\n\nUse Telegram Markdown formatting.`,\n\n  flashcard: `You are a study assistant. Create exactly 5 flashcard pairs for \"${topic}\" suitable for a university student.\n\nFormat EXACTLY like this:\n🃏 *Flashcards: ${topic}*\n\n*Card 1*\n🔷 *Q:* <question or term>\n🔶 *A:* <answer or definition>\n\n*Card 2* ... (repeat for all 5 cards)\n\n---\n💡 _Cover the answers and test yourself!_\n\nUse Telegram Markdown formatting.`\n};\n\nconst systemPrompt = `You are an expert AI study assistant helping students learn effectively. \nAlways use Telegram Markdown formatting (bold with *, italic with _, code with backticks).\nBe accurate, educational, and encouraging.`;\n\nreturn [{\n  json: {\n    ...$input.first().json,\n    systemPrompt,\n    userPrompt: prompts[mode] || prompts['explain']\n  }\n}];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "build-prompt",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 380]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": { "timeout": 60000 },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type",      "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={{ JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 1500, system: $json.systemPrompt, messages: [{ role: 'user', content: $json.userPrompt }] }) }}"
+            }
+          ]
+        }
+      },
+      "id": "call-claude",
+      "name": "Call Claude API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1560, 380],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "claude-api-key",
+          "name": "Claude API Key"
+        }
+      }
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// ── Extract Claude response + format for Telegram ─────────\nconst raw = $input.first().json;\nconst prev = $('Build Prompt').first().json;\n\n// Claude returns content array\nconst content = raw.content || [];\nconst textBlock = content.find(b => b.type === 'text');\nlet reply = textBlock?.text || 'Sorry, I could not generate a response. Please try again.';\n\n// Telegram has 4096 char limit per message — truncate if needed\nif (reply.length > 4000) {\n  reply = reply.slice(0, 3900) + '\\n\\n_...truncated. Try a more specific topic._';\n}\n\nreturn [{\n  json: {\n    chatId:   prev.chatId,\n    username: prev.username,\n    mode:     prev.mode,\n    topic:    prev.topic,\n    reply\n  }\n}];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "extract-reply",
+      "name": "Extract Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 380]
+    },
+
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.reply }}",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "id": "send-reply",
+      "name": "Send AI Reply",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2000, 380]
+    },
+
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ '✅ Done! Want more?\\n\\n📖 /summary ' + $json.topic + '\\n❓ /quiz ' + $json.topic + '\\n🃏 /flashcard ' + $json.topic }}",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "id": "send-followup",
+      "name": "Send Follow-up Options",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2220, 380]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// ── Format error message for Telegram ───────────────────\nconst err = $input.first().json;\nconst chatId = err.chatId || null;\nreturn [{\n  json: {\n    chatId,\n    errorMsg: '⚠️ Something went wrong while generating your response.\\n\\nPlease try again in a moment, or rephrase your topic.\\n\\n_Error: ' + (err.message || 'Unknown error') + '_'\n  }\n}];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "format-error",
+      "name": "Format Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 560]
+    },
+
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.errorMsg }}",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "id": "send-error",
+      "name": "Send Error to User",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1780, 560]
+    }
+
+  ],
+
+  "connections": {
+    "Telegram Trigger": {
+      "main": [[{ "node": "Parse Message", "type": "main", "index": 0 }]]
+    },
+    "Parse Message": {
+      "main": [[{ "node": "Is /start or /help?", "type": "main", "index": 0 }]]
+    },
+    "Is /start or /help?": {
+      "main": [
+        [{ "node": "Send Welcome Message", "type": "main", "index": 0 }],
+        [{ "node": "Has Topic?",           "type": "main", "index": 0 }]
+      ]
+    },
+    "Has Topic?": {
+      "main": [
+        [{ "node": "Send Thinking Message", "type": "main", "index": 0 }],
+        [{ "node": "Ask for Topic",         "type": "main", "index": 0 }]
+      ]
+    },
+    "Send Thinking Message": {
+      "main": [[{ "node": "Build Prompt", "type": "main", "index": 0 }]]
+    },
+    "Build Prompt": {
+      "main": [[{ "node": "Call Claude API", "type": "main", "index": 0 }]]
+    },
+    "Call Claude API": {
+      "main": [[{ "node": "Extract Reply", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Format Error",  "type": "main", "index": 0 }]]
+    },
+    "Extract Reply": {
+      "main": [[{ "node": "Send AI Reply", "type": "main", "index": 0 }]]
+    },
+    "Send AI Reply": {
+      "main": [[{ "node": "Send Follow-up Options", "type": "main", "index": 0 }]]
+    },
+    "Format Error": {
+      "main": [[{ "node": "Send Error to User", "type": "main", "index": 0 }]]
+    }
+  },
+
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "meta": { "instanceId": "ai-study-assistant-v1" },
+  "pinData": {},
+  "versionId": "1",
+  "triggerCount": 1,
+  "tags": [
+    { "name": "study-assistant" },
+    { "name": "telegram" },
+    { "name": "claude-ai" },
+    { "name": "education" }
+  ]
+}
